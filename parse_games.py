@@ -13,28 +13,25 @@ headers = [
 
 print("Initializing Master 2026 Player-Aware Baseball Dataset...")
 
-# 1. FETCH ACTUAL 2026 PLAYER PERFORMANCE REGISTRIES
 print("Caching current 2026 player metrics from MLB API...")
 batter_cache = {}
 pitcher_cache = {}
 
 try:
-    # Hitting splits for 2026 season
     b_url = "https://statsapi.mlb.com/api/v1/stats?stats=season&season=2026&group=hitting&limit=1500"
     b_data = requests.get(b_url).json().get('stats', [{}])[0].get('splits', [])
     for split in b_data:
-        p_id = split.get('player', {}).get('id')
+        p_id = str(split.get('player', {}).get('id'))
         stats = split.get('stat', {})
         batter_cache[p_id] = {
             'avg': float(stats.get('avg', '.000').replace('.', '0.') if '.' in str(stats.get('avg')) else 0.0),
             'ops': float(stats.get('ops', 0.0))
         }
         
-    # Pitching splits for 2026 season
     p_url = "https://statsapi.mlb.com/api/v1/stats?stats=season&season=2026&group=pitching&limit=1500"
     p_data = requests.get(p_url).json().get('stats', [{}])[0].get('splits', [])
     for split in p_data:
-        p_id = split.get('player', {}).get('id')
+        p_id = str(split.get('player', {}).get('id'))
         stats = split.get('stat', {})
         outs = float(stats.get('outs', 1))
         so = float(stats.get('strikeOuts', 0))
@@ -100,8 +97,8 @@ for index, game_id in enumerate(game_ids):
                 away_score = result.get('awayScore', 0)
                 score_differential = home_score - away_score
                 
-                b_id = matchup.get('batter', {}).get('id')
-                p_id = matchup.get('pitcher', {}).get('id')
+                b_id = str(matchup.get('batter', {}).get('id'))
+                p_id = str(matchup.get('pitcher', {}).get('id'))
                 b_stats = batter_cache.get(b_id, {'avg': 0.245, 'ops': 0.730})
                 p_stats = pitcher_cache.get(p_id, {'era': 4.20, 'so_rate': 0.22})
                 
