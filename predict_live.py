@@ -2,10 +2,10 @@ import requests
 import torch
 import torch.nn as nn
 import statsapi
+import numpy as np
 import time
 from datetime import datetime, timedelta
 
-# 1. Define the updated 14-input network layout
 class WinProbabilityModel(nn.Module):
     def __init__(self):
         super(WinProbabilityModel, self).__init__()
@@ -18,20 +18,22 @@ class WinProbabilityModel(nn.Module):
         x = self.sigmoid(self.output(x))
         return x
 
-# Load the advanced trained brain parameters
 model = WinProbabilityModel()
 model.load_state_dict(torch.load("blue_jays_model.pth"))
 model.eval()
 
 BLUE_JAYS_ID = 141
 
-# Fetch and cache seasonal player metrics so the live tracker can read them instantly
-print("Initializing live matchup tracking engine...")
+# Matching Min-Max reference vectors used during model training
+feature_mins = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -15.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+feature_maxs = np.array([12.0, 1.0, 3.0, 4.0, 3.0, 1.0, 1.0, 1.0, 15.0, 0.400, 1.200, 15.0, 1.0], dtype=np.float32)
+
+print("Initializing live matchup tracking engine on 2026 registry feeds...")
 batter_cache = {}
 pitcher_cache = {}
 
 try:
-    b_url = "https://statsapi.mlb.com/api/v1.1/stats?stats=season&season=2025&group=hitting&limit=1500"
+    b_url = "https://statsapi.mlb.com/api/v1.1/stats?stats=season&season=2026&group=hitting&limit=1500"
     b_splits = requests.get(b_url).json().get('stats', [{}])[0].get('splits', [])
     for split in b_splits:
         p_id = split.get('player', {}).get('id')
@@ -41,7 +43,7 @@ try:
             'ops': float(stats.get('ops', 0.0))
         }
         
-    p_url = "https://statsapi.mlb.com/api/v1.1/stats?stats=season&season=2025&group=pitching&limit=1500"
+    p_url = "https://statsapi.mlb.com/api/v1.1/stats?stats=season&season=2026&group=pitching&limit=1500"
     p_splits = requests.get(p_url).json().get('stats', [{}])[0].get('splits', [])
     for split in p_splits:
         p_id = split.get('player', {}).get('id')
@@ -71,7 +73,7 @@ def get_active_game_id():
 
 GAME_ID = get_active_game_id()
 if not GAME_ID:
-    print("Could not find any recent games.")
+    print("Could not locate any recent matches.")
     exit()
 
 url = f"https://statsapi.mlb.com/api/v1.1/game/{GAME_ID}/feed/live"
@@ -83,7 +85,6 @@ try:
     away_team = live_data.get('gameData', {}).get('teams', {}).get('away', {}).get('name')
     home_team = live_data.get('gameData', {}).get('teams', {}).get('home', {}).get('name')
     home_team_id = live_data.get('gameData', {}).get('teams', {}).get('home', {}).get('id')
-    
     is_home = True if home_team_id == BLUE_JAYS_ID else False
     
     print(f"\nTracking Game ID: {GAME_ID}")
@@ -104,41 +105,49 @@ try:
         balls = count.get('balls', 0)
         strikes = count.get('strikes', 0)
         
-        is_bj_batting = 0
-        if (half_inning == 'bottom' and is_home) or (half_inning == 'top' and not is_home):
-            is_bj_batting = 1
-            
+        is_bj_batting = 1 if (half_inning == 'bottom' and is_home) or (half_inning == 'top' and not is_home) else 0
         runner_on_1st = 1 if 'postOnFirst' in matchup else 0
         runner_on_2nd = 1 if 'postOnSecond' in matchup else 0
         runner_on_3rd = 1 if 'postOnThird' in matchup else 0
         
         home_score = result.get('homeScore', 0)
         away_score = result.get('awayScore', 0)
+        
+        # Calculate scores from Toronto's perspective
+        bj_score = home_score if is_home else away_score
+        opp_score = away_score if is_home else home_score
         score_differential = home_score - away_score
         
-        # Grab player identity profiles
         batter_name = matchup.get('batter', {}).get('fullName', 'Unknown Batter')
         pitcher_name = matchup.get('pitcher', {}).get('fullName', 'Unknown Pitcher')
-        
         b_id = matchup.get('batter', {}).get('id')
         p_id = matchup.get('pitcher', {}).get('id')
         
         b_stats = batter_cache.get(b_id, {'avg': 0.245, 'ops': 0.730})
         p_stats = pitcher_cache.get(p_id, {'era': 4.20, 'so_rate': 0.22})
         
-        # Assemble all 14 input values sequentially to pass into our tensor
-        current_moment = [
-            float(inning), float(is_bj_batting), float(outs), float(balls), float(strikes),
-            float(runner_on_1st), float(runner_on_2nd), float(runner_on_3rd), float(score_differential),
-            b_stats['avg'], b_stats['ops'], p_stats['era'], p_stats['so_rate']
-        ]
-        
-        input_tensor = torch.tensor([current_moment], dtype=torch.float32)
-        
-        with torch.no_grad():
-            win_probability = model(input_tensor).item() * 100
+        # IDEA A: EXPLICIT BOUNDARY LOGIC OVERRIDES
+        # If it's the 9th inning or later and 3 outs have occurred, check who won to force 0% or 100%
+        if inning >= 9 and outs == 3:
+            if bj_score > opp_score:
+                win_probability = 100.00
+            else:
+                win_probability = 0.00
+        else:
+            # IDEA B: ASSEMBLE AND SCALE INFERENCE INPUTS
+            current_moment = np.array([
+                float(inning), float(is_bj_batting), float(outs), float(balls), float(strikes),
+                float(runner_on_1st), float(runner_on_2nd), float(runner_on_3rd), float(score_differential),
+                b_stats['avg'], b_stats['ops'], p_stats['era'], p_stats['so_rate']
+            ], dtype=np.float32)
             
-        # Clean display tickers showing base runners and player names
+            # Match the training data normalization bounds perfectly
+            scaled_moment = (current_moment - feature_mins) / (feature_maxs - feature_mins)
+            input_tensor = torch.tensor([scaled_moment], dtype=torch.float32)
+            
+            with torch.no_grad():
+                win_probability = model(input_tensor).item() * 100
+
         bases_occupied = []
         if runner_on_1st: bases_occupied.append("1st")
         if runner_on_2nd: bases_occupied.append("2nd(RISP)")
