@@ -27,38 +27,47 @@ BLUE_JAYS_ID = 141
 feature_mins = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -15.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
 feature_maxs = np.array([12.0, 1.0, 3.0, 4.0, 3.0, 1.0, 1.0, 1.0, 15.0, 0.400, 1.200, 15.0, 1.0], dtype=np.float32)
 
-print("Initializing live matchup tracking engine on 2026 registry feeds...")
+print("Initializing live matchup tracking engine with target player tracking lookups...")
 batter_cache = {}
 pitcher_cache = {}
 
-try:
-    print("Caching current 2026 player metrics from MLB API...")
-    # FIXED: Changed api/v1.1 to api/v1
-    b_url = "https://statsapi.mlb.com/api/v1/stats?stats=season&season=2026&group=hitting&limit=1500"
-    b_splits = requests.get(b_url).json().get('stats', [{}])[0].get('splits', [])
-    for split in b_splits:
-        p_id = str(split.get('player', {}).get('id'))
-        stats = split.get('stat', {})
-        batter_cache[p_id] = {
-            'avg': float(stats.get('avg', '.000').replace('.', '0.') if '.' in str(stats.get('avg')) else 0.0),
-            'ops': float(stats.get('ops', 0.0))
-        }
-        
-    # FIXED: Changed api/v1.1 to api/v1
-    p_url = "https://statsapi.mlb.com/api/v1/stats?stats=season&season=2026&group=pitching&limit=1500"
-    p_splits = requests.get(p_url).json().get('stats', [{}])[0].get('splits', [])
-    for split in p_splits:
-        p_id = str(split.get('player', {}).get('id'))
-        stats = split.get('stat', {})
-        outs = float(stats.get('outs', 1))
-        so = float(stats.get('strikeOuts', 0))
-        pitcher_cache[p_id] = {
-            'era': float(stats.get('era', 4.20) if stats.get('era') != '-.--' else 4.20),
-            'so_rate': float(so / outs if outs > 0 else 0.0)
-        }
-    print(f"Successfully loaded data for {len(batter_cache)} batters and {len(pitcher_cache)} pitchers.")
-except Exception as e:
-    print(f"Stats cache warning: {e}")
+def get_live_batter_stats(b_id):
+    if b_id in batter_cache:
+        return batter_cache[b_id]
+    try:
+        url = f"https://statsapi.mlb.com/api/v1/people/{b_id}/stats?stats=season&season=2026&group=hitting"
+        res = requests.get(url).json().get('stats', [])
+        if res:
+            stat = res[0].get('splits', [{}])[0].get('stat', {})
+            batter_cache[b_id] = {
+                'avg': float(stat.get('avg', '.000').replace('.', '0.') if '.' in str(stat.get('avg')) else 0.245),
+                'ops': float(stat.get('ops', 0.730))
+            }
+            return batter_cache[b_id]
+    except Exception:
+        pass
+    return {'avg': 0.245, 'ops': 0.730}
+
+def get_live_pitcher_stats(p_id):
+    if p_id in pitcher_cache:
+        return pitcher_cache[p_id]
+    try:
+        url = f"https://statsapi.mlb.com/api/v1/people/{p_id}/stats?stats=season&season=2026&group=pitching"
+        res = requests.get(url).json().get('stats', [])
+        if res:
+            stat = res[0].get('splits', [{}])[0].get('stat', {})
+            raw_era = stat.get('era')
+            era_val = float(raw_era) if (raw_era and raw_era != '-.--') else 3.95
+            outs = float(stat.get('outs', 1))
+            so = float(stat.get('strikeOuts', 0))
+            pitcher_cache[p_id] = {
+                'era': era_val,
+                'so_rate': float(so / outs if outs > 0 else 0.22)
+            }
+            return pitcher_cache[p_id]
+    except Exception:
+        pass
+    return {'era': 3.95, 'so_rate': 0.22}
 
 def get_active_game_id():
     current_date = datetime.now()
@@ -126,15 +135,23 @@ try:
         b_id = str(matchup.get('batter', {}).get('id'))
         p_id = str(matchup.get('pitcher', {}).get('id'))
         
-        b_stats = batter_cache.get(b_id, {'avg': 0.245, 'ops': 0.730})
-        p_stats = pitcher_cache.get(p_id, {'era': 4.20, 'so_rate': 0.22})
+        b_stats = get_live_batter_stats(b_id)
+        p_stats = get_live_pitcher_stats(p_id)
         
-        if inning >= 9 and outs == 3:
-            if bj_score > opp_score:
+        # FIXED: Precise, non-leaking boundary check condition loops
+        is_game_over = False
+        if inning >= 9:
+            if half_inning == 'top' and outs == 3 and bj_score > opp_score:
+                is_game_over = True
                 win_probability = 100.00
-            else:
-                win_probability = 0.00
-        else:
+            elif half_inning == 'bottom' and outs == 3:
+                is_game_over = True
+                win_probability = 100.00 if bj_score > opp_score else 0.00
+            elif half_inning == 'bottom' and bj_score > opp_score:
+                is_game_over = True
+                win_probability = 100.00
+
+        if not is_game_over:
             current_moment = np.array([
                 float(inning), float(is_bj_batting), float(outs), float(balls), float(strikes),
                 float(runner_on_1st), float(runner_on_2nd), float(runner_on_3rd), float(score_differential),
@@ -142,7 +159,7 @@ try:
             ], dtype=np.float32)
             
             scaled_moment = (current_moment - feature_mins) / (feature_maxs - feature_mins)
-            input_tensor = torch.tensor([scaled_moment], dtype=torch.float32)
+            input_tensor = torch.from_numpy(scaled_moment).float().unsqueeze(0)
             
             with torch.no_grad():
                 win_probability = model(input_tensor).item() * 100
@@ -161,7 +178,7 @@ try:
         print(f">>> Blue Jays Live Win Probability: {win_probability:.2f}%\n")
         print("-" * 90)
         
-        time.sleep(0.4)
+        time.sleep(0.1)
 
 except Exception as e:
     print(f"Error tracking live game: {e}")

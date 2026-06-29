@@ -11,37 +11,47 @@ headers = [
     "batter_avg", "batter_ops", "pitcher_era", "pitcher_so_rate", "blue_jays_won"
 ]
 
-print("Initializing Master 2026 Player-Aware Baseball Dataset...")
-
-print("Caching current 2026 player metrics from MLB API...")
+print("Initializing On-Demand Lazy Loading Processing Engine...")
 batter_cache = {}
 pitcher_cache = {}
 
-try:
-    b_url = "https://statsapi.mlb.com/api/v1/stats?stats=season&season=2026&group=hitting&limit=1500"
-    b_data = requests.get(b_url).json().get('stats', [{}])[0].get('splits', [])
-    for split in b_data:
-        p_id = str(split.get('player', {}).get('id'))
-        stats = split.get('stat', {})
-        batter_cache[p_id] = {
-            'avg': float(stats.get('avg', '.000').replace('.', '0.') if '.' in str(stats.get('avg')) else 0.0),
-            'ops': float(stats.get('ops', 0.0))
-        }
-        
-    p_url = "https://statsapi.mlb.com/api/v1/stats?stats=season&season=2026&group=pitching&limit=1500"
-    p_data = requests.get(p_url).json().get('stats', [{}])[0].get('splits', [])
-    for split in p_data:
-        p_id = str(split.get('player', {}).get('id'))
-        stats = split.get('stat', {})
-        outs = float(stats.get('outs', 1))
-        so = float(stats.get('strikeOuts', 0))
-        pitcher_cache[p_id] = {
-            'era': float(stats.get('era', 4.50) if stats.get('era') != '-.--' else 4.50),
-            'so_rate': float(so / outs if outs > 0 else 0.0)
-        }
-    print(f"Successfully cached data for {len(batter_cache)} batters and {len(pitcher_cache)} pitchers.\n")
-except Exception as e:
-    print(f"Warning, stats cache failed: {e}. Reverting to default baselines.")
+def get_batter_stats(b_id):
+    if b_id in batter_cache:
+        return batter_cache[b_id]
+    try:
+        url = f"https://statsapi.mlb.com/api/v1/people/{b_id}/stats?stats=season&season=2026&group=hitting"
+        res = requests.get(url).json().get('stats', [])
+        if res:
+            stat = res[0].get('splits', [{}])[0].get('stat', {})
+            batter_cache[b_id] = {
+                'avg': float(stat.get('avg', '.000').replace('.', '0.') if '.' in str(stat.get('avg')) else 0.245),
+                'ops': float(stat.get('ops', 0.730))
+            }
+            return batter_cache[b_id]
+    except Exception:
+        pass
+    return {'avg': 0.245, 'ops': 0.730}
+
+def get_pitcher_stats(p_id):
+    if p_id in pitcher_cache:
+        return pitcher_cache[p_id]
+    try:
+        url = f"https://statsapi.mlb.com/api/v1/people/{p_id}/stats?stats=season&season=2026&group=pitching"
+        res = requests.get(url).json().get('stats', [])
+        if res:
+            stat = res[0].get('splits', [{}])[0].get('stat', {})
+            raw_era = stat.get('era')
+            era_val = float(raw_era) if (raw_era and raw_era != '-.--') else 3.95
+            outs = float(stat.get('outs', 1))
+            so = float(stat.get('strikeOuts', 0))
+            pitcher_cache[p_id] = {
+                'era': era_val,
+                'so_rate': float(so / outs if outs > 0 else 0.22)
+            }
+            return pitcher_cache[p_id]
+    except Exception:
+        pass
+    return {'era': 3.95, 'so_rate': 0.22}
 
 with open(output_file, mode="w", newline="") as f:
     writer = csv.writer(f)
@@ -51,8 +61,7 @@ with open("blue_jays_ids_2025.txt", "r") as f:
     game_ids = f.read().splitlines()
 
 for index, game_id in enumerate(game_ids):
-    if (index + 1) % 15 == 0 or index == 0:
-        print(f"[{index + 1}/{len(game_ids)}] Merging metrics for Game ID: {game_id}...")
+    print(f"[{index + 1}/{len(game_ids)}] Processing historical context rows for Game ID: {game_id}...")
     
     url = f"https://statsapi.mlb.com/api/v1.1/game/{game_id}/feed/live"
     try:
@@ -62,7 +71,6 @@ for index, game_id in enumerate(game_ids):
         live_data_folder = live_data.get('liveData', {})
         linescore = live_data_folder.get('linescore', {})
         home_team_id = live_data.get('gameData', {}).get('teams', {}).get('home', {}).get('id')
-        away_team_id = live_data.get('gameData', {}).get('teams', {}).get('away', {}).get('id')
         
         home_runs = linescore.get('teams', {}).get('home', {}).get('runs', 0)
         away_runs = linescore.get('teams', {}).get('away', {}).get('runs', 0)
@@ -99,8 +107,9 @@ for index, game_id in enumerate(game_ids):
                 
                 b_id = str(matchup.get('batter', {}).get('id'))
                 p_id = str(matchup.get('pitcher', {}).get('id'))
-                b_stats = batter_cache.get(b_id, {'avg': 0.245, 'ops': 0.730})
-                p_stats = pitcher_cache.get(p_id, {'era': 4.20, 'so_rate': 0.22})
+                
+                b_stats = get_batter_stats(b_id)
+                p_stats = get_pitcher_stats(p_id)
                 
                 row = [
                     game_id, inning, is_bj_batting, outs, balls, strikes,
@@ -109,8 +118,8 @@ for index, game_id in enumerate(game_ids):
                     bj_won
                 ]
                 writer.writerow(row)
-        time.sleep(0.02)
+        time.sleep(0.01)
     except Exception as e:
         continue
 
-print("\nSuccess! Custom dataset built with full 2026 batter and pitcher data.")
+print("\nSuccess! Custom dataset built with full dynamic player registries.")
